@@ -1,14 +1,14 @@
-#![allow(unused)]
-
 use compact_str::CompactString;
 use derive_deftly::{Deftly, derive_deftly_adhoc};
-use serde::{Deserialize, Serialize, Serializer, de::IgnoredAny, ser, ser::SerializeSeq};
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer, de::IgnoredAny, ser, ser::SerializeSeq,
+};
 use serde_constant::ConstBool;
 use serde_json::Value;
 use serde_variant::to_variant_name;
 use serde_with::DeserializeFromStr;
 use std::{collections::BTreeMap, fmt::Debug, path::PathBuf};
-use strum::EnumString;
+use strum::{EnumDiscriminants, EnumIter, EnumString, IntoStaticStr};
 use url::Url;
 
 #[derive(Serialize)]
@@ -21,15 +21,8 @@ pub(super) struct Request {
 #[derive(Serialize)]
 #[serde(untagged)]
 pub(crate) enum Command {
-    Raw(Vec<Value>),
     List(ListCommand),
     Named(NamedCommand),
-}
-
-impl From<Vec<Value>> for Command {
-    fn from(value: Vec<Value>) -> Self {
-        Command::Raw(value)
-    }
 }
 
 impl From<ListCommand> for Command {
@@ -44,29 +37,14 @@ impl From<NamedCommand> for Command {
     }
 }
 
+/// A command sent as a JSON array: its snake_case name, then its fields.
 #[derive(Deftly)]
 #[derive_deftly_adhoc]
 pub(crate) enum ListCommand {
-    ClientName,
-    GetTimeUs,
     GetProperty(&'static str),
-    GetPropertyString(&'static str),
     SetProperty(&'static str, Value),
-    SetPropertyString(&'static str, CompactString),
     ObserveProperty(i64, &'static str),
-    ObservePropertyString(i64, &'static str),
-    UnobserveProperty(i64),
-    GetVersion,
-    Cycle(
-        &'static str,
-        #[deftly(skip_serializing_if = "Option::is_none")] Option<CycleDirection>,
-    ),
-}
-
-#[derive(Serialize)]
-pub(crate) enum CycleDirection {
-    Up,
-    Down,
+    Cycle(&'static str),
 }
 
 derive_deftly_adhoc! {
@@ -81,13 +59,7 @@ derive_deftly_adhoc! {
             match self {
                 $($vpat => {
                     seq.serialize_element(stringify!(${snake_case $vname}))?;
-                    $(${select1 fmeta(skip_serializing_if) {
-                        if !${fmeta(skip_serializing_if) as path}($fpatname) {
-                            seq.serialize_element($fpatname)?;
-                        }
-                    } else {
-                        seq.serialize_element($fpatname)?;
-                    }})
+                    $( seq.serialize_element($fpatname)?; )
                 })
             }
             seq.end()
@@ -112,21 +84,8 @@ pub(crate) enum NamedCommand {
         #[serde(skip_serializing_if = "Option::is_none")]
         options: Option<BTreeMap<CompactString, CompactString>>,
     },
-    Loadlist {
-        url: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        flags: Option<LoadFlags>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        index: Option<i64>,
-    },
-    PlaylistNext {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        flags: Option<PlaylistFlags>,
-    },
-    PlaylistPrev {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        flags: Option<PlaylistFlags>,
-    },
+    PlaylistNext,
+    PlaylistPrev,
     PlaylistShuffle,
     PlaylistUnshuffle,
     Quit {
@@ -164,14 +123,11 @@ impl From<SeekPrecision> for SeekFlags {
 pub(crate) enum SeekMode {
     Relative,
     Absolute,
-    AbsolutePercent,
-    RelativePercent,
 }
 
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum SeekPrecision {
-    Keyframes,
     Exact,
 }
 
@@ -203,19 +159,6 @@ impl Serialize for SeekFlags {
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum LoadFlags {
     Replace,
-    Append,
-    AppendPlay,
-    InsertNext,
-    InsertNextPlay,
-    InsertAt,
-    InsertAtPlay,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum PlaylistFlags {
-    Weak,
-    Force,
 }
 
 #[derive(Deserialize)]
@@ -225,6 +168,7 @@ pub(super) enum Response {
         #[serde(default)]
         data: Value,
         request_id: i64,
+        #[allow(dead_code, reason = "only checks that the reply is a success")]
         error: CommandResponseSuccess,
     },
     CommandResponseFailure {
@@ -249,28 +193,11 @@ pub(crate) enum Event {
     StartFile {
         playlist_entry_id: i64,
     },
-    EndFile {
-        reason: EndFileReason,
-        playlist_entry_id: i64,
-        #[serde(default)]
-        file_error: Option<CompactString>,
-        #[serde(default)]
-        playlist_insert_id: Option<i64>,
-        #[serde(default)]
-        playlist_insert_num_entries: Option<i64>,
-    },
+    EndFile,
     FileLoaded,
     Seek,
     PlaybackRestart,
     Shutdown,
-    LogMessage {
-        prefix: CompactString,
-        level: CompactString,
-        text: CompactString,
-    },
-    ClientMessage {
-        args: Vec<CompactString>,
-    },
     VideoReconfig,
     AudioReconfig,
     PropertyChange(Property),
@@ -278,51 +205,67 @@ pub(crate) enum Event {
     Seeked {
         playback_time: Seconds,
     },
-    #[serde(skip_deserializing)]
-    Unknown(CompactString),
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum EndFileReason {
-    Eof,
-    Stop,
-    Quit,
-    Error,
-    Redirect,
-    #[serde(other)]
-    Unknown,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug)]
 pub(crate) enum Property {
     Known(KnownProperty),
-    Unknown { name: CompactString, data: Value },
+    /// A property that isn't known, or whose value didn't parse.
+    Unknown {
+        name: CompactString,
+        data: Value,
+    },
 }
 
-#[derive(Debug, Deserialize)]
+impl<'de> Deserialize<'de> for Property {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            name: CompactString,
+            // mpv leaves `data` out when the property has no value. Treat that
+            // as null, which parses as `None`.
+            #[serde(default)]
+            data: Value,
+        }
+        let Raw { name, data } = Raw::deserialize(deserializer)?;
+        let mut raw = serde_json::json!({ "name": name.as_str(), "data": data });
+        Ok(match KnownProperty::deserialize(&raw) {
+            Ok(property) => Self::Known(property),
+            Err(_) => Self::Unknown {
+                name,
+                data: raw["data"].take(),
+            },
+        })
+    }
+}
+
+#[derive(Debug, Deserialize, EnumDiscriminants)]
 #[serde(tag = "name", content = "data", rename_all = "kebab-case")]
+#[strum_discriminants(
+    name(KnownPropertyName),
+    derive(EnumIter, IntoStaticStr),
+    strum(serialize_all = "kebab-case")
+)]
 pub(crate) enum KnownProperty {
-    Fullscreen(#[serde(default)] Option<bool>),
+    Fullscreen(Option<bool>),
     // -1 when there is no current entry, e.g. after `stop`.
-    PlaylistCurrentPos(#[serde(default)] Option<i64>),
-    PlaylistCount(#[serde(default)] Option<u64>),
-    Seekable(#[serde(default)] Option<bool>),
-    IdleActive(#[serde(default)] Option<bool>),
-    EofReached(#[serde(default)] Option<bool>),
-    Pause(#[serde(default)] Option<bool>),
-    LoopFile(#[serde(default)] Option<LoopData>),
-    LoopPlaylist(#[serde(default)] Option<LoopData>),
-    Speed(#[serde(default)] Option<f64>),
-    Shuffle(#[serde(default)] Option<bool>),
-    Volume(#[serde(default)] Option<f64>),
-    Duration(#[serde(default)] Option<Seconds>),
-    MediaTitle(#[serde(default)] Option<String>),
-    Metadata(#[serde(default)] BTreeMap<MetadataKey, String>),
-    TrackList(#[serde(default)] Vec<Track>),
-    Path(#[serde(default)] Option<Path>),
-    WorkingDirectory(#[serde(default)] Option<PathBuf>),
+    PlaylistCurrentPos(Option<i64>),
+    PlaylistCount(Option<u64>),
+    Seekable(Option<bool>),
+    IdleActive(Option<bool>),
+    EofReached(Option<bool>),
+    Pause(Option<bool>),
+    LoopFile(Option<LoopData>),
+    LoopPlaylist(Option<LoopData>),
+    Speed(Option<f64>),
+    Shuffle(Option<bool>),
+    Volume(Option<f64>),
+    Duration(Option<Seconds>),
+    MediaTitle(Option<String>),
+    Metadata(Option<BTreeMap<MetadataKey, String>>),
+    TrackList(Option<Vec<Track>>),
+    Path(Option<Path>),
+    WorkingDirectory(Option<PathBuf>),
 }
 
 #[derive(Debug, Deserialize)]
@@ -373,6 +316,7 @@ pub(crate) enum MetadataKey {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(untagged)]
+#[allow(dead_code, reason = "the `ConstBool` fields only select the variant")]
 pub(crate) enum Track {
     #[serde(rename_all = "kebab-case")]
     EmbeddedAlbumArt {
@@ -426,5 +370,38 @@ impl From<f64> for Seconds {
 impl From<Seconds> for f64 {
     fn from(time: Seconds) -> Self {
         time.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use strum::IntoEnumIterator;
+
+    // Properties are observed by their `KnownPropertyName`, so it must match
+    // the name serde parses. mpv leaves `data` out when there is no value.
+    #[test]
+    fn observed_properties_parse_without_data() {
+        for name in KnownPropertyName::iter() {
+            let line = serde_json::json!({
+                "event": "property-change",
+                "id": 0,
+                "name": <&str>::from(name),
+            })
+            .to_string();
+            let response: Response = serde_json::from_str(&line).unwrap();
+            let Response::Event(Event::PropertyChange(Property::Known(property))) = response else {
+                panic!("{line} didn't parse as a known property");
+            };
+            assert_eq!(KnownPropertyName::from(&property), name);
+        }
+    }
+
+    // Unit variants must still match when mpv sends fields the plugin ignores.
+    #[test]
+    fn end_file_parses_with_fields() {
+        let line = r#"{"event":"end-file","reason":"eof","playlist_entry_id":1}"#;
+        let response: Response = serde_json::from_str(line).unwrap();
+        assert!(matches!(response, Response::Event(Event::EndFile)));
     }
 }

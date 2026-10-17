@@ -3,6 +3,7 @@ use derive_deftly::{Deftly, derive_deftly_adhoc};
 use enumflags2::{BitFlags, bitflags};
 use smol::lock::RwLock;
 use std::{collections::BTreeMap, path::PathBuf};
+use strum::IntoEnumIterator;
 use url::Url;
 
 #[derive(Clone, Debug, Default, Deftly)]
@@ -33,33 +34,12 @@ pub(crate) struct State {
 
 impl super::Player {
     pub(crate) async fn new(mpv: Mpv) -> Result<Self, mpv::Error> {
-        async fn property<T: Default>(mpv: &Mpv, name: &'static str) -> Result<T, mpv::Error> {
+        // Observe every property `State::change` handles. mpv sends each one's
+        // current value as a property-change event, which `main_loop` applies.
+        for name in mpv::KnownPropertyName::iter() {
             mpv.observe_property(name).await?;
-            Ok(Default::default())
         }
-
-        let state = RwLock::new(State {
-            fullscreen: property(&mpv, "fullscreen").await?,
-            playlist_entry_id: None,
-            playlist_current_pos: property(&mpv, "playlist-current-pos").await?,
-            playlist_count: property(&mpv, "playlist-count").await?,
-            seekable: property(&mpv, "seekable").await?,
-            idle_active: property(&mpv, "idle-active").await?,
-            eof_reached: property(&mpv, "eof-reached").await?,
-            pause: property(&mpv, "pause").await?,
-            loop_file: property(&mpv, "loop-file").await?,
-            loop_playlist: property(&mpv, "loop-playlist").await?,
-            speed: property(&mpv, "speed").await?,
-            shuffle: property(&mpv, "shuffle").await?,
-            volume: property(&mpv, "volume").await?,
-            duration: property(&mpv, "duration").await?,
-            media_title: property(&mpv, "media-title").await?,
-            metadata: property(&mpv, "metadata").await?,
-            track_list: property(&mpv, "track-list").await?,
-            path: property(&mpv, "path").await?,
-            working_directory: property(&mpv, "working-directory").await?,
-            art_url: None,
-        });
+        let state = RwLock::new(State::default());
         Ok(Self { mpv, state })
     }
 
@@ -117,10 +97,10 @@ impl State {
                 self.media_title = media_title.unwrap_or_default();
             }
             KnownProperty::Metadata(metadata) => {
-                self.metadata = metadata;
+                self.metadata = metadata.unwrap_or_default();
             }
             KnownProperty::TrackList(track_list) => {
-                self.track_list = track_list;
+                self.track_list = track_list.unwrap_or_default();
             }
             KnownProperty::Path(path) => {
                 self.path = path;
