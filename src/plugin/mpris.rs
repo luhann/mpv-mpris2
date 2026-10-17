@@ -395,15 +395,20 @@ impl super::Player {
         let mut state = self.state.write().await;
         let old = mem::replace(&mut *state, new);
 
+        // Compare with the art in use, not the old state's, so it doesn't
+        // matter which steps of a track change were sent separately.
         let art = art::find(&state.track_list, &state.path, &state.working_directory);
-        if art != art::find(&old.track_list, &old.path, &old.working_directory) {
-            match art {
+        if art != state.art {
+            state.art_url = match &art {
+                Some(art::Track::External(url)) => Some(url.clone()),
+                // Set when the extracted image arrives.
                 Some(art::Track::Embedded(path, index)) => {
-                    changes.embedded_art = Some((path, index));
+                    changes.embedded_art = Some((path.clone(), *index));
+                    None
                 }
-                Some(art::Track::External(url)) => state.art_url = Some(url),
-                None => (),
-            }
+                None => None,
+            };
+            state.art = art;
         }
 
         let state = RwLockWriteGuard::downgrade(state);

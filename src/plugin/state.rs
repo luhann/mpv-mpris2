@@ -28,6 +28,10 @@ pub(crate) struct State {
     pub(crate) path: Option<mpv::Path>,
     pub(crate) working_directory: Option<PathBuf>,
     pub(crate) art_url: Option<Url>,
+    /// Where `art_url` comes from. Cleared by `start-file`, so each track's
+    /// art is worked out again.
+    #[deftly(skip)]
+    pub(super) art: Option<super::art::Track>,
     #[deftly(skip)]
     pub(crate) track_list: Vec<mpv::Track>,
 }

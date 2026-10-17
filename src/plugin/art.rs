@@ -8,11 +8,17 @@ use url::Url;
 pub(super) struct State {
     task: Option<smol::Task<()>>,
     file: Option<NamedTempFile>,
-    tx: kanal::AsyncSender<NamedTempFile>,
+    tx: kanal::AsyncSender<Extracted>,
+}
+
+/// An extracted image, and the embedded art it came from.
+pub(super) struct Extracted {
+    pub(super) source: Track,
+    pub(super) file: NamedTempFile,
 }
 
 impl State {
-    pub(super) fn new() -> (Self, kanal::AsyncReceiver<NamedTempFile>) {
+    pub(super) fn new() -> (Self, kanal::AsyncReceiver<Extracted>) {
         let (tx, rx) = kanal::bounded_async(0);
         let this = Self {
             task: None,
@@ -29,7 +35,7 @@ impl State {
     }
 
     /// Extracts the image in stream `index` of `path`, replacing any extraction
-    /// in progress. The file is sent to the receiver returned by [`State::new`].
+    /// in progress. The image is sent to the receiver returned by [`State::new`].
     pub(super) fn spawn_worker(&mut self, ex: &smol::LocalExecutor, path: PathBuf, index: u64) {
         let tx = self.tx.clone();
         self.task = Some(ex.spawn(async move {
@@ -45,7 +51,7 @@ impl State {
 }
 
 async fn worker(
-    tx: kanal::AsyncSender<NamedTempFile>,
+    tx: kanal::AsyncSender<Extracted>,
     path: PathBuf,
     index: u64,
 ) -> anyhow::Result<()> {
@@ -71,13 +77,14 @@ async fn worker(
         file.as_file().metadata()?.len() > 0,
         "ffmpeg wrote no image"
     );
-    if let Err(e) = tx.send(file).await {
-        tracing::error!(error = %e, "Failed to send art url");
+    let source = Track::Embedded(path, index);
+    if let Err(e) = tx.send(Extracted { source, file }).await {
+        tracing::error!(error = %e, "Failed to send extracted art");
     }
     Ok(())
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum Track {
     Embedded(PathBuf, u64),
     External(Url),
